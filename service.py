@@ -18,12 +18,9 @@ import dns.message
 import dns.edns
 import dns.query
 import sys
-import signal
-
-def handle_sigterm(signum, frame):
-    print("signal SIGTERM received, exiting...")
-    logging.warning("signal SIGTERM received, exiting...")
-    raise KeyboardInterrupt
+import socket
+import requests
+import ssl
 
 def is_valid_ipv4(ip_str):
     try:
@@ -32,6 +29,17 @@ def is_valid_ipv4(ip_str):
     except ipaddress.AddressValueError:
         return False
 
+def do_doh_query(query):
+    try:
+        return requests.post(doh_url,data=query,headers = {"Content-Type": "application/dns-message"}).content
+    except Exception:
+        error_data = {
+            'error_code': code,
+            'error_type': type(e).__name__,
+            'error_message': str(e)
+        }
+        return json.dumps({'error': error_data}).encode('utf-8')
+
 def requestDNSAnswer(query, clientip=''):
     # Parse the DNS query message from wire format
     request = dns.message.from_wire(query)
@@ -39,7 +47,10 @@ def requestDNSAnswer(query, clientip=''):
     # Log DNS query details: type, domain, and client IP if available
     if len(request.question) > 0:
         question = request.question[0]
-        logging.debug(f'query {dns.rdatatype.to_text(question.rdtype)} {question.name.to_text()} from {clientip}')
+        logging.info(f'query {dns.rdatatype.to_text(question.rdtype)} {question.name.to_text()} from {clientip}')
+
+    if question.rdtype == dns.rdatatype.HTTPS:
+        return do_doh_query(query)
 
     # Include EDNS with ECS option from client IP address if client IP address is valid
     '''if is_valid_ipv4(clientip):
@@ -66,17 +77,15 @@ def requestDNSAnswer(query, clientip=''):
 def main():
     # Enable address reuse to prevent 'Address already in use' error
     socketserver.TCPServer.allow_reuse_address = True
-    signal.signal(signal.SIGTERM, handle_sigterm)
 
     # Create the DoH server
     #with socketserver.TCPServer((host, port), DohHandler) as httpd:
     with http.server.ThreadingHTTPServer((host, port), DohHandler) as httpd:
+        httpd.socket = ssl.wrap_socket(httpd.socket, certfile=certpath, keyfile=keypath, server_side=True)
         try:
             print(f'Serving DoH on {host}:{port} using DNS server {dnsserver}')
             logging.warning('Service start')
-            with open('httpd.log', 'a', buffering=1) as f:
-                sys.stdout = f
-                httpd.serve_forever()
+            httpd.serve_forever()
         except KeyboardInterrupt:
             logging.warning('KeyboardInterrupt received, shutting down the server...')
             httpd.shutdown()
@@ -115,6 +124,10 @@ class DohHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             dns_answer = requestDNSAnswer(dns_query, self.headers[realipheader])
+        except dns.exception.FormError as e:
+            self.sendErrorResponse(400, e)
+            logging.info(e)
+            return
         except Exception as e:
             # Provides a 'Internal Server Error' response in case of a DNS resolution error
             self.sendErrorResponse(500, e)
@@ -137,6 +150,10 @@ class DohHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             dns_answer = requestDNSAnswer(dns_query, self.headers[realipheader])
+        except dns.exception.FormError as e:
+            self.sendErrorResponse(400, e)
+            logging.info(e)
+            return
         except Exception as e:
             # Provides a 'Internal Server Error' response in case of a DNS resolution error
             self.sendErrorResponse(500, e)
@@ -146,21 +163,39 @@ class DohHandler(http.server.BaseHTTPRequestHandler):
         # Respond with DoH response
         self.sendDoHResponse(dns_answer)
 
+    def log_message(self, format, *args):
+        message = format % args
+        #default log will write into stderre
+        #sys.stderr.write("%s - - [%s] %s\n" %
+                         #(self.address_string(),
+                          #self.log_date_time_string(),
+                          #message.translate(self._control_char_table)))
+        logging.info("%s - - [%s] %s" %
+                         (self.address_string(),
+                          self.log_date_time_string(),
+                          message.translate(self._control_char_table)))
+
 if __name__ == '__main__':
     # Set the LogLevel to logging.WARNING or logging.ERROR to suppress the output of DNS requests
     logging.basicConfig(filename='dns-server.log',
                         filemode='a',
                         format='[%(asctime)s] [%(name)s/%(levelname)-4s]: %(message)s',
-                        level=logging.WARNING)
+                        level=logging.INFO)
 
     # Set the server address, port, dns server, dns request timeout (in seconds) and the real ip header
-    host = '127.0.0.1'
-    port = 53533
-    dnsserver = '127.0.0.1'
-    timeout = 4
+    with open('config.json') as f:
+        conf = json.load(f)
+    host = conf['host']
+    port = conf['port']
+    dnsserver = conf['dnsserver']
+    timeout = conf['timeout']
     #if timeout is larger than 10s, Chrome will close its https connection, which will cause 499 in nginx and net::ERR_DNS_TIMED_OUT in Chrome
     #if timeout it 10s, Chrome will receive HTTP 500 and result in net::ERR_DNS_MALFORMED_RESPONSE
-    realipheader = 'X-Forwarded-For'
+    realipheader = conf['realipheader']
+    #local and remote DoH settings
+    doh_url = conf['doh_url']
+    certpath = conf['certpath']
+    keypath = conf['keypath']
 
     # Call the main function
     main()
