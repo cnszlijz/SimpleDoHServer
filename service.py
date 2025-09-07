@@ -77,6 +77,9 @@ def requestDNSAnswer(query, clientip=''):
     # Return the DNS response
     return response.to_wire()
 
+class ThreadingHTTPServerV6(http.server.ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
 def main():
     # Enable address reuse to prevent 'Address already in use' error
     socketserver.TCPServer.allow_reuse_address = True
@@ -85,7 +88,10 @@ def main():
 
     # Create the DoH server
     #with socketserver.TCPServer((host, port), DohHandler) as httpd:
-    with http.server.ThreadingHTTPServer((host, port), DohHandler) as httpd:
+    HTTPServer = http.server.ThreadingHTTPServer
+    if ':' in host:
+        HTTPServer = ThreadingHTTPServerV6
+    with HTTPServer((host, port), DohHandler) as httpd:
         httpd.socket = ssl.wrap_socket(httpd.socket, certfile=certpath, keyfile=keypath, server_side=True)
         try:
             print(f'Serving DoH on {host}:{port} using DNS server {dnsserver}')
