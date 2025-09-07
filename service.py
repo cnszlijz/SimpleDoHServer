@@ -21,6 +21,7 @@ import sys
 import socket
 import requests
 import ssl
+import warnings
 
 def is_valid_ipv4(ip_str):
     try:
@@ -31,7 +32,9 @@ def is_valid_ipv4(ip_str):
 
 def do_doh_query(query):
     try:
-        return requests.post(doh_url,data=query,headers = {"Content-Type": "application/dns-message"}).content
+        response = requests.post(doh_url,data=query,headers = {"Content-Type": "application/dns-message"}, verify = verifySSL)
+        logging.debug(f'DoH return {response.status_code}')
+        return response.content
     except Exception:
         error_data = {
             'error_code': code,
@@ -77,6 +80,8 @@ def requestDNSAnswer(query, clientip=''):
 def main():
     # Enable address reuse to prevent 'Address already in use' error
     socketserver.TCPServer.allow_reuse_address = True
+
+    warnings.simplefilter("ignore", requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
     # Create the DoH server
     #with socketserver.TCPServer((host, port), DohHandler) as httpd:
@@ -180,7 +185,7 @@ if __name__ == '__main__':
     logging.basicConfig(filename='dns-server.log',
                         filemode='a',
                         format='[%(asctime)s] [%(name)s/%(levelname)-4s]: %(message)s',
-                        level=logging.INFO)
+                        level=logging.WARNING)
 
     # Set the server address, port, dns server, dns request timeout (in seconds) and the real ip header
     with open('config.json') as f:
@@ -196,6 +201,7 @@ if __name__ == '__main__':
     doh_url = conf['doh_url']
     certpath = conf['certpath']
     keypath = conf['keypath']
+    verifySSL = not conf['allowInsecure']
 
     # Call the main function
     main()
